@@ -135,6 +135,13 @@ app.get("/", (req, res) => {
   });
 });
 
+app.get("/api/version", (req, res) => {
+  res.json({
+    current: process.env.CURRENT_VERSION,
+    min: process.env.MIN_VERSION
+  });
+});
+
 // ── 1. VERSION CHECK ─────────────────────────
 // Called by tool on startup to check for updates
 app.post("/api/version", (req, res) => {
