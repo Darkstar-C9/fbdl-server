@@ -137,8 +137,8 @@ app.get("/", (req, res) => {
 
 app.get("/api/version", (req, res) => {
   res.json({
-    current: process.env.CURRENT_VERSION,
-    min: process.env.MIN_VERSION
+    current: CURRENT_VERSION,
+    min: MIN_VERSION
   });
 });
 
