@@ -1,7 +1,6 @@
 // ═══════════════════════════════════════════════════
-//  FB Downloader Pro — License Server
-//  Node.js + Express
-//  Deploy on: Render / Railway (Free)
+//  FB Downloader Pro — Login-Based License Server v2
+//  Node.js + Express | Deploy: Render (free)
 // ═══════════════════════════════════════════════════
 
 const express = require("express");
@@ -9,308 +8,82 @@ const crypto  = require("crypto");
 const fs      = require("fs");
 const path    = require("path");
 
-const app  = express();
+const app = express();
 app.use(express.json());
+app.use(express.static(path.join(__dirname, "public")));
 
-// ─────────────────────────────────────────────
-//  CONFIG — Change these!
-// ─────────────────────────────────────────────
-const MASTER_SECRET   = process.env.MASTER_SECRET   || "FBDLPRO_CHANGE_THIS_TO_SOMETHING_UNIQUE_2025";
-const ADMIN_PASSWORD  = process.env.ADMIN_PASSWORD  || "admin123_change_this";
+// ── CONFIG ───────────────────────────────────────
+const ADMIN_PASSWORD  = process.env.ADMIN_PASSWORD  || "Dark@@@x3@xrt";
 const CURRENT_VERSION = process.env.CURRENT_VERSION || "3.1.0";
-const MIN_VERSION     = process.env.MIN_VERSION     || "3.1.0";  // Below this = FORCE UPDATE
+const MIN_VERSION     = process.env.MIN_VERSION     || "3.1.0";
+const TOKEN_SECRET    = process.env.TOKEN_SECRET    || "FBDLTokenSecret2026XYZ";
 const APP_NAME        = "FB Downloader Pro";
 
-// ─────────────────────────────────────────────
-//  DATABASE (JSON file — simple & free)
-//  On Render: use environment variable for data
-//  or upgrade to MongoDB Atlas (also free)
-// ─────────────────────────────────────────────
-const DB_FILE = path.join(__dirname, "data", "keys.json");
+// ── DATABASE ─────────────────────────────────────
+const DATA_DIR   = path.join(__dirname, "data");
+const USERS_FILE = path.join(DATA_DIR, "users.json");
 
-function loadDB() {
+function loadUsers() {
   try {
-    if (!fs.existsSync(path.dirname(DB_FILE))) {
-      fs.mkdirSync(path.dirname(DB_FILE), { recursive: true });
-    }
-    if (fs.existsSync(DB_FILE)) {
-      return JSON.parse(fs.readFileSync(DB_FILE, "utf8"));
-    }
-  } catch (e) {}
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    if (fs.existsSync(USERS_FILE)) return JSON.parse(fs.readFileSync(USERS_FILE, "utf8"));
+  } catch(e) {}
   return {};
 }
 
-function saveDB(db) {
+function saveUsers(db) {
+  try { fs.writeFileSync(USERS_FILE, JSON.stringify(db, null, 2)); } catch(e) {}
+}
+
+// ── TOKEN ────────────────────────────────────────
+function generateToken(username) {
+  const ts  = Date.now();
+  const sig = crypto.createHmac("sha256", TOKEN_SECRET)
+    .update(`${username}:${ts}`).digest("hex").slice(0, 16);
+  return Buffer.from(`${username}:${ts}:${sig}`).toString("base64");
+}
+
+function verifyToken(token) {
   try {
-    fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
-  } catch (e) {}
+    const decoded = Buffer.from(token, "base64").toString("utf8");
+    const [username, ts, sig] = decoded.split(":");
+    const expected = crypto.createHmac("sha256", TOKEN_SECRET)
+      .update(`${username}:${ts}`).digest("hex").slice(0, 16);
+    if (sig !== expected) return null;
+    if (Date.now() - parseInt(ts) > 30 * 24 * 60 * 60 * 1000) return null;
+    return username;
+  } catch(e) { return null; }
 }
 
-// ─────────────────────────────────────────────
-//  KEY ENGINE (same logic as Python)
-// ─────────────────────────────────────────────
-const MONTH_DEC = { A:1,B:2,C:3,D:4,E:5,F:6,G:7,H:8,I:9,J:10,K:11,L:12 };
-const PLAN_DEC  = { M:"monthly",Q:"quarterly",H:"halfyearly",Y:"yearly",L:"lifetime" };
+// ── PLAN HELPERS ─────────────────────────────────
+const PLAN_DAYS = { monthly:30, quarterly:90, halfyearly:180, yearly:365, lifetime:99999 };
 
-function decodeDate(enc) {
-  if (enc === "X000000") return null;
-  const month = MONTH_DEC[enc[0]];
-  const day   = parseInt(enc.slice(1,3));
-  const year  = parseInt(enc.slice(3).split("").reverse().join(""));
-  if (!month || !day || !year) return null;
-  return new Date(year, month - 1, day);
+function calcExpiry(plan) {
+  if (plan === "lifetime") return null;
+  const d = new Date();
+  d.setDate(d.getDate() + (PLAN_DAYS[plan] || 30));
+  return d.toISOString().split("T")[0];
 }
 
-function verifySignature(planCode, dateEnc, cid) {
-  const payload = `${planCode}${dateEnc}${cid}`;
-  return crypto.createHmac("sha256", MASTER_SECRET)
-    .update(payload).digest("hex").slice(0,8).toUpperCase();
+function daysLeft(expiry) {
+  if (!expiry) return 99999;
+  return Math.max(0, Math.floor((new Date(expiry) - new Date()) / 86400000));
 }
 
-function validateKeyLogic(key) {
-  key = key.trim().toUpperCase();
-  const parts = key.split("-");
-  if (parts.length !== 4 || parts[0] !== "FBPRO") {
-    return { valid: false, message: "Invalid key format" };
-  }
-  const [, dataPart, cid, sigGiven] = parts;
-  if (dataPart.length !== 9) {
-    return { valid: false, message: "Invalid key length" };
-  }
-  const planCode = dataPart[0];
-  const dateEnc  = dataPart.slice(1);
-  const sigExp   = verifySignature(planCode, dateEnc, cid);
-
-  if (sigGiven !== sigExp) {
-    return { valid: false, message: "Invalid key — signature mismatch" };
-  }
-
-  const plan = PLAN_DEC[planCode];
-  if (!plan) return { valid: false, message: "Unknown plan" };
-
-  const expDate = decodeDate(dateEnc);
-  if (!expDate) {
-    return { valid: true, plan: "lifetime", expiry: null, daysLeft: 99999, cid };
-  }
-
-  const today    = new Date();
-  today.setHours(0,0,0,0);
-  const daysLeft = Math.floor((expDate - today) / 86400000);
-
-  if (daysLeft < 0) {
-    return { valid: false, message: `License expired on ${expDate.toDateString()}` };
-  }
-
-  return {
-    valid: true,
-    plan,
-    expiry:   expDate.toISOString().split("T")[0],
-    daysLeft,
-    cid
-  };
+function hashPassword(pwd) {
+  return crypto.createHash("sha256").update(pwd + TOKEN_SECRET).digest("hex");
 }
 
-// ─────────────────────────────────────────────
-//  MIDDLEWARE — Admin auth
-// ─────────────────────────────────────────────
+// ── MIDDLEWARE ───────────────────────────────────
 function adminAuth(req, res, next) {
   const pwd = req.headers["x-admin-password"] || req.body?.adminPassword;
-  if (pwd !== ADMIN_PASSWORD) {
-    return res.status(401).json({ error: "Unauthorized" });
-  }
+  if (pwd !== ADMIN_PASSWORD) return res.status(401).json({ error: "Unauthorized" });
   next();
 }
 
-// ─────────────────────────────────────────────
-//  ROUTES
-// ─────────────────────────────────────────────
-
-// Health check
-app.get("/", (req, res) => {
-  res.json({
-    app:     APP_NAME,
-    version: CURRENT_VERSION,
-    status:  "online",
-    time:    new Date().toISOString()
-  });
-});
-
-app.get("/api/version", (req, res) => {
-  res.json({
-    current: CURRENT_VERSION,
-    min: MIN_VERSION
-  });
-});
-
-// ── 1. VERSION CHECK ─────────────────────────
-// Called by tool on startup to check for updates
-app.post("/api/version", (req, res) => {
-  const { version, app: appName } = req.body;
-
-  if (!version) {
-    return res.status(400).json({ error: "version required" });
-  }
-
-  const isOutdated     = compareVersions(version, CURRENT_VERSION) < 0;
-  const isForcedUpdate = compareVersions(version, MIN_VERSION) < 0;
-
-  res.json({
-    currentVersion: CURRENT_VERSION,
-    minVersion:     MIN_VERSION,
-    isOutdated,
-    isForcedUpdate,
-    // Message shown to user in app
-    message: isForcedUpdate
-      ? `⛔ Version ${version} is no longer supported. Please update to v${CURRENT_VERSION}.`
-      : isOutdated
-      ? `🔔 New version v${CURRENT_VERSION} is available! Please update.`
-      : null,
-    // Download link for update
-    downloadUrl: isForcedUpdate || isOutdated
-      ? "https://t.me/YourTelegramChannel"  // Change this!
-      : null
-  });
-});
-
-// ── 2. KEY VALIDATE ──────────────────────────
-// Called by tool when user enters a key
-app.post("/api/validate", (req, res) => {
-  const { key, version, app: appName } = req.body;
-
-  if (!key) {
-    return res.status(400).json({ valid: false, message: "Key required" });
-  }
-
-  // First: validate key signature (offline logic)
-  const result = validateKeyLogic(key);
-  if (!result.valid) {
-    return res.json({ valid: false, message: result.message });
-  }
-
-  // Second: check if key is revoked in DB
-  const db      = loadDB();
-  const keyData = db[key.toUpperCase()];
-
-  if (keyData?.revoked) {
-    return res.json({
-      valid: false,
-      message: `❌ License revoked: ${keyData.revokeReason || "Contact support"}`
-    });
-  }
-
-  // Log activation/validation
-  if (!keyData) {
-    // First time this key is seen online — register it
-    db[key.toUpperCase()] = {
-      plan:        result.plan,
-      expiry:      result.expiry,
-      cid:         result.cid,
-      firstSeen:   new Date().toISOString(),
-      lastSeen:    new Date().toISOString(),
-      activations: 1,
-      revoked:     false,
-    };
-  } else {
-    db[key.toUpperCase()].lastSeen    = new Date().toISOString();
-    db[key.toUpperCase()].activations = (keyData.activations || 0) + 1;
-  }
-  saveDB(db);
-
-  res.json({
-    valid:    true,
-    plan:     result.plan,
-    expiry:   result.expiry,
-    daysLeft: result.daysLeft,
-    cid:      result.cid,
-    message:  `✅ Valid | ${result.plan.toUpperCase()} | ${result.expiry ? `Expires: ${result.expiry} (${result.daysLeft}d left)` : "Lifetime"}`
-  });
-});
-
-// ── 3. REVOKE KEY (admin) ────────────────────
-app.post("/api/admin/revoke", adminAuth, (req, res) => {
-  const { key, reason } = req.body;
-  if (!key) return res.status(400).json({ error: "key required" });
-
-  const db  = loadDB();
-  const k   = key.toUpperCase();
-  db[k]     = db[k] || {};
-  db[k].revoked      = true;
-  db[k].revokeReason = reason || "Revoked by admin";
-  db[k].revokedAt    = new Date().toISOString();
-  saveDB(db);
-
-  res.json({ success: true, message: `Key ${k} revoked` });
-});
-
-// ── 4. UNREVOKE KEY (admin) ──────────────────
-app.post("/api/admin/unrevoke", adminAuth, (req, res) => {
-  const { key } = req.body;
-  if (!key) return res.status(400).json({ error: "key required" });
-
-  const db = loadDB();
-  const k  = key.toUpperCase();
-  if (db[k]) {
-    db[k].revoked = false;
-    delete db[k].revokeReason;
-    saveDB(db);
-  }
-  res.json({ success: true, message: `Key ${k} unrevoked` });
-});
-
-// ── 5. SET VERSION (admin) ───────────────────
-// Change MIN_VERSION to force all old users to update
-app.post("/api/admin/version", adminAuth, (req, res) => {
-  const { current, minimum } = req.body;
-  // On Render: you'd update env vars, here we just acknowledge
-  // In production: store in DB or env
-  res.json({
-    success: true,
-    message: `To force update: set MIN_VERSION=${minimum || MIN_VERSION} in your Render environment variables`,
-    current: CURRENT_VERSION,
-    minimum: MIN_VERSION,
-  });
-});
-
-// ── 6. LIST KEYS (admin) ─────────────────────
-app.get("/api/admin/keys", adminAuth, (req, res) => {
-  const db = loadDB();
-  const summary = Object.entries(db).map(([key, v]) => ({
-    key,
-    plan:        v.plan,
-    expiry:      v.expiry || "Lifetime",
-    cid:         v.cid,
-    revoked:     v.revoked || false,
-    activations: v.activations || 0,
-    lastSeen:    v.lastSeen || "never",
-  }));
-  res.json({ total: summary.length, keys: summary });
-});
-
-// ── 7. STATS (admin) ─────────────────────────
-app.get("/api/admin/stats", adminAuth, (req, res) => {
-  const db      = loadDB();
-  const keys    = Object.values(db);
-  const active  = keys.filter(k => !k.revoked).length;
-  const revoked = keys.filter(k => k.revoked).length;
-  const today   = new Date().toISOString().split("T")[0];
-  const seenToday = keys.filter(k => k.lastSeen?.startsWith(today)).length;
-
-  res.json({
-    totalKeys:   keys.length,
-    activeKeys:  active,
-    revokedKeys: revoked,
-    seenToday,
-    appVersion:  CURRENT_VERSION,
-    minVersion:  MIN_VERSION,
-  });
-});
-
-// ─────────────────────────────────────────────
-//  HELPERS
-// ─────────────────────────────────────────────
 function compareVersions(a, b) {
-  const pa = a.split(".").map(Number);
-  const pb = b.split(".").map(Number);
+  const pa = (a||"0").split(".").map(Number);
+  const pb = (b||"0").split(".").map(Number);
   for (let i = 0; i < 3; i++) {
     if ((pa[i]||0) < (pb[i]||0)) return -1;
     if ((pa[i]||0) > (pb[i]||0)) return  1;
@@ -318,11 +91,241 @@ function compareVersions(a, b) {
   return 0;
 }
 
-// ─────────────────────────────────────────────
-//  START
-// ─────────────────────────────────────────────
+// ════════════════════════════════════════════════
+//  PUBLIC API
+// ════════════════════════════════════════════════
+
+app.get("/", (req, res) => {
+  res.json({ app: APP_NAME, version: CURRENT_VERSION, status: "online", time: new Date().toISOString() });
+});
+
+// ── REGISTER
+app.post("/api/register", (req, res) => {
+  let { username, password, email } = req.body;
+  if (!username || !password)
+    return res.json({ success: false, message: "Username and password required" });
+
+  username = username.trim();
+  if (!/^[a-zA-Z0-9_]{3,20}$/.test(username))
+    return res.json({ success: false, message: "Username: 3-20 chars, letters/numbers/_ only" });
+  if (password.length < 6)
+    return res.json({ success: false, message: "Password must be at least 6 characters" });
+
+  const db  = loadUsers();
+  const key = username.toLowerCase();
+  if (db[key]) return res.json({ success: false, message: "Username already taken" });
+
+  db[key] = {
+    username,
+    email:        email || "",
+    passwordHash: hashPassword(password),
+    approved:     false,
+    blocked:      false,
+    plan:         null,
+    expiry:       null,
+    approvedAt:   null,
+    registeredAt: new Date().toISOString(),
+    lastLogin:    null,
+    loginCount:   0,
+    device:       req.body.device || "",
+    lastVersion:  "",
+  };
+  saveUsers(db);
+
+  res.json({ success: true, message: "Account created! Waiting for admin approval. Contact us on WhatsApp/Telegram." });
+});
+
+// ── LOGIN
+app.post("/api/login", (req, res) => {
+  const { username, password, version, device } = req.body;
+  if (!username || !password)
+    return res.json({ success: false, message: "Username and password required" });
+
+  const db   = loadUsers();
+  const key  = username.toLowerCase().trim();
+  const user = db[key];
+
+  if (!user)   return res.json({ success: false, message: "Account not found. Please register first." });
+  if (user.blocked) return res.json({ success: false, message: "Account blocked. Contact support." });
+
+  if (hashPassword(password) !== user.passwordHash)
+    return res.json({ success: false, message: "Wrong password." });
+
+  if (!user.approved)
+    return res.json({ success: false, pending: true, message: "Account pending approval. Contact us on WhatsApp/Telegram." });
+
+  const dl = daysLeft(user.expiry);
+  if (user.plan !== "lifetime" && dl <= 0)
+    return res.json({ success: false, expired: true, message: `License expired on ${user.expiry}. Please renew.` });
+
+  if (version && compareVersions(version, MIN_VERSION) < 0)
+    return res.json({ success: false, forceUpdate: true, message: `Please update to v${CURRENT_VERSION}.` });
+
+  // Update stats
+  db[key].lastLogin   = new Date().toISOString();
+  db[key].loginCount  = (user.loginCount || 0) + 1;
+  db[key].device      = device || user.device || "";
+  db[key].lastVersion = version || "";
+  saveUsers(db);
+
+  const token = generateToken(key);
+  res.json({
+    success:    true,
+    token,
+    username:   user.username,
+    plan:       user.plan,
+    expiry:     user.expiry || null,
+    daysLeft:   dl,
+    isLifetime: user.plan === "lifetime",
+    message:    `Welcome ${user.username}! ${user.plan === "lifetime" ? "Lifetime access" : `${dl} days left`}`
+  });
+});
+
+// ── TOKEN VERIFY (app startup)
+app.post("/api/verify", (req, res) => {
+  const { token, version } = req.body;
+  if (!token) return res.json({ valid: false, message: "No token" });
+
+  const username = verifyToken(token);
+  if (!username) return res.json({ valid: false, message: "Session expired. Please login again." });
+
+  const db   = loadUsers();
+  const user = db[username];
+  if (!user)        return res.json({ valid: false, message: "Account not found" });
+  if (user.blocked) return res.json({ valid: false, message: "Account blocked" });
+  if (!user.approved) return res.json({ valid: false, message: "Account not approved" });
+
+  const dl = daysLeft(user.expiry);
+  if (user.plan !== "lifetime" && dl <= 0)
+    return res.json({ valid: false, expired: true, message: "License expired. Please renew." });
+
+  if (version && compareVersions(version, MIN_VERSION) < 0)
+    return res.json({ valid: false, forceUpdate: true, message: `Update to v${CURRENT_VERSION}` });
+
+  res.json({
+    valid:      true,
+    username:   user.username,
+    plan:       user.plan,
+    expiry:     user.expiry,
+    daysLeft:   dl,
+    isLifetime: user.plan === "lifetime",
+  });
+});
+
+// ════════════════════════════════════════════════
+//  ADMIN API
+// ════════════════════════════════════════════════
+
+app.get("/api/admin/stats", adminAuth, (req, res) => {
+  const db    = loadUsers();
+  const users = Object.values(db);
+  const today = new Date().toISOString().split("T")[0];
+  res.json({
+    total:      users.length,
+    approved:   users.filter(u => u.approved && !u.blocked).length,
+    pending:    users.filter(u => !u.approved && !u.blocked).length,
+    blocked:    users.filter(u => u.blocked).length,
+    loginToday: users.filter(u => u.lastLogin?.startsWith(today)).length,
+    plans: {
+      monthly:    users.filter(u => u.plan === "monthly").length,
+      quarterly:  users.filter(u => u.plan === "quarterly").length,
+      halfyearly: users.filter(u => u.plan === "halfyearly").length,
+      yearly:     users.filter(u => u.plan === "yearly").length,
+      lifetime:   users.filter(u => u.plan === "lifetime").length,
+    },
+    appVersion: CURRENT_VERSION,
+    minVersion: MIN_VERSION,
+  });
+});
+
+app.get("/api/admin/users", adminAuth, (req, res) => {
+  const db = loadUsers();
+  const users = Object.values(db).map(u => ({
+    username:     u.username,
+    email:        u.email || "",
+    approved:     u.approved,
+    blocked:      u.blocked || false,
+    plan:         u.plan || "none",
+    expiry:       u.expiry || "N/A",
+    daysLeft:     u.expiry ? daysLeft(u.expiry) : (u.plan === "lifetime" ? 99999 : 0),
+    registeredAt: u.registeredAt,
+    lastLogin:    u.lastLogin || "never",
+    loginCount:   u.loginCount || 0,
+    device:       u.device || "",
+    lastVersion:  u.lastVersion || "",
+  }));
+  res.json({ total: users.length, users });
+});
+
+app.post("/api/admin/approve", adminAuth, (req, res) => {
+  const { username, plan } = req.body;
+  if (!username || !plan) return res.status(400).json({ error: "username and plan required" });
+  const validPlans = Object.keys(PLAN_DAYS);
+  if (!validPlans.includes(plan)) return res.status(400).json({ error: `Invalid plan` });
+
+  const db  = loadUsers();
+  const key = username.toLowerCase();
+  if (!db[key]) return res.status(404).json({ error: "User not found" });
+
+  db[key].approved   = true;
+  db[key].blocked    = false;
+  db[key].plan       = plan;
+  db[key].approvedAt = new Date().toISOString();
+  db[key].expiry     = calcExpiry(plan);
+  saveUsers(db);
+
+  res.json({ success: true, message: `${username} approved — ${plan}`, expiry: db[key].expiry || "Lifetime" });
+});
+
+app.post("/api/admin/block", adminAuth, (req, res) => {
+  const { username, reason } = req.body;
+  if (!username) return res.status(400).json({ error: "username required" });
+  const db  = loadUsers();
+  const key = username.toLowerCase();
+  if (!db[key]) return res.status(404).json({ error: "User not found" });
+  db[key].blocked     = true;
+  db[key].blockReason = reason || "Blocked by admin";
+  db[key].blockedAt   = new Date().toISOString();
+  saveUsers(db);
+  res.json({ success: true, message: `${username} blocked` });
+});
+
+app.post("/api/admin/unblock", adminAuth, (req, res) => {
+  const { username } = req.body;
+  if (!username) return res.status(400).json({ error: "username required" });
+  const db  = loadUsers();
+  const key = username.toLowerCase();
+  if (!db[key]) return res.status(404).json({ error: "User not found" });
+  db[key].blocked = false;
+  delete db[key].blockReason;
+  saveUsers(db);
+  res.json({ success: true, message: `${username} unblocked` });
+});
+
+app.post("/api/admin/plan", adminAuth, (req, res) => {
+  const { username, plan } = req.body;
+  if (!username || !plan) return res.status(400).json({ error: "username and plan required" });
+  const db  = loadUsers();
+  const key = username.toLowerCase();
+  if (!db[key]) return res.status(404).json({ error: "User not found" });
+  db[key].plan   = plan;
+  db[key].expiry = calcExpiry(plan);
+  saveUsers(db);
+  res.json({ success: true, message: `${username} plan changed to ${plan}`, expiry: db[key].expiry || "Lifetime" });
+});
+
+app.delete("/api/admin/user/:username", adminAuth, (req, res) => {
+  const db  = loadUsers();
+  const key = req.params.username.toLowerCase();
+  if (!db[key]) return res.status(404).json({ error: "User not found" });
+  delete db[key];
+  saveUsers(db);
+  res.json({ success: true, message: `${key} deleted` });
+});
+
+// ── START ────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`✅ ${APP_NAME} License Server running on port ${PORT}`);
+  console.log(`✅ ${APP_NAME} Server v2 on port ${PORT}`);
   console.log(`   Version: ${CURRENT_VERSION} | Min: ${MIN_VERSION}`);
 });
