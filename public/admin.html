@@ -247,7 +247,7 @@
       <label>Admin Password</label>
       <input type="password" id="admin-pwd" placeholder="Enter admin password" onkeydown="if(event.key==='Enter')doLogin()">
     </div>
-    <button class="btn-primary" onclick="doLogin()">Login</button>
+    <button class="btn-primary" id="login-btn" onclick="doLogin()">Login</button>
     <div class="login-err" id="login-err"></div>
   </div>
 </div>
@@ -401,26 +401,55 @@ let allUsers = [];
 
 document.getElementById("server-url-display").textContent = SERVER_URL;
 
+// ── WAKE UP SERVER on page load ───────────────────
+// Render free tier cold start fix — page khulte hi ping karo
+(async function wakeUp() {
+  try {
+    await fetch(`${SERVER_URL}/`, { method: "GET" });
+  } catch(e) {}
+})();
+
 // ── LOGIN ─────────────────────────────────────────
 async function doLogin() {
   const pwd = document.getElementById("admin-pwd").value.trim();
   if (!pwd) return;
   const err = document.getElementById("login-err");
-  err.textContent = "Checking...";
-  try {
-    const r = await fetch(`${SERVER_URL}/api/admin/stats`, {
-      headers: { "x-admin-password": pwd }
-    });
-    if (r.status === 401) { err.textContent = "❌ Wrong password"; return; }
-    if (!r.ok) { err.textContent = "❌ Server error"; return; }
-    adminPwd = pwd;
-    document.getElementById("login-screen").style.display = "none";
-    document.getElementById("app").style.display = "block";
-    err.textContent = "";
-    loadData(false);
-    setInterval(() => loadData(false), 30000); // auto refresh every 30s
-  } catch(e) {
-    err.textContent = "❌ Cannot reach server";
+
+  // Retry logic — cold start pe 3 baar try karo
+  const MAX_RETRIES = 3;
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      if (attempt === 1) {
+        err.textContent = "⏳ Connecting to server...";
+      } else {
+        err.textContent = `⏳ Retrying... (${attempt}/${MAX_RETRIES}) Server waking up, please wait`;
+      }
+
+      const r = await fetch(`${SERVER_URL}/api/admin/stats`, {
+        headers: { "x-admin-password": pwd },
+        signal: AbortSignal.timeout(20000) // 20 sec timeout per attempt
+      });
+
+      if (r.status === 401) { err.textContent = "❌ Wrong password"; return; }
+      if (!r.ok) { err.textContent = "❌ Server error"; return; }
+
+      // Success!
+      adminPwd = pwd;
+      document.getElementById("login-screen").style.display = "none";
+      document.getElementById("app").style.display = "block";
+      err.textContent = "";
+      loadData(false);
+      setInterval(() => loadData(false), 30000);
+      return;
+
+    } catch(e) {
+      if (attempt === MAX_RETRIES) {
+        err.textContent = "❌ Server unreachable — try again in 30 seconds";
+      } else {
+        // Wait 5 sec before retry
+        await new Promise(r => setTimeout(r, 5000));
+      }
+    }
   }
 }
 
