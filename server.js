@@ -50,7 +50,8 @@ function verifyToken(token) {
     const expected = crypto.createHmac("sha256", TOKEN_SECRET)
       .update(`${username}:${ts}`).digest("hex").slice(0, 16);
     if (sig !== expected) return null;
-    if (Date.now() - parseInt(ts) > 30 * 24 * 60 * 60 * 1000) return null;
+    // Token kabhi expire nahi hoga — sirf license expiry matter karti hai
+    // if (Date.now() - parseInt(ts) > 90 * 24 * 60 * 60 * 1000) return null;
     return username;
   } catch(e) { return null; }
 }
