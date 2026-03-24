@@ -402,11 +402,32 @@ let allUsers = [];
 document.getElementById("server-url-display").textContent = SERVER_URL;
 
 // ── WAKE UP SERVER on page load ───────────────────
-// Render free tier cold start fix — page khulte hi ping karo
 (async function wakeUp() {
+  try { await fetch(`${SERVER_URL}/`, { method: "GET" }); } catch(e) {}
+})();
+
+// ── AUTO LOGIN — saved password check ────────────
+(async function autoLogin() {
+  const saved = localStorage.getItem("fbdl_admin_pwd");
+  if (!saved) return;
   try {
-    await fetch(`${SERVER_URL}/`, { method: "GET" });
-  } catch(e) {}
+    const r = await fetch(`${SERVER_URL}/api/admin/stats`, {
+      headers: { "x-admin-password": saved },
+      signal: AbortSignal.timeout(20000)
+    });
+    if (r.ok) {
+      adminPwd = saved;
+      document.getElementById("login-screen").style.display = "none";
+      document.getElementById("app").style.display = "block";
+      loadData(false);
+      setInterval(() => loadData(false), 30000);
+    } else {
+      // Wrong saved password — clear it
+      localStorage.removeItem("fbdl_admin_pwd");
+    }
+  } catch(e) {
+    // Server unreachable — show login screen normally
+  }
 })();
 
 // ── LOGIN ─────────────────────────────────────────
@@ -415,26 +436,24 @@ async function doLogin() {
   if (!pwd) return;
   const err = document.getElementById("login-err");
 
-  // Retry logic — cold start pe 3 baar try karo
   const MAX_RETRIES = 3;
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
-      if (attempt === 1) {
-        err.textContent = "⏳ Connecting to server...";
-      } else {
-        err.textContent = `⏳ Retrying... (${attempt}/${MAX_RETRIES}) Server waking up, please wait`;
-      }
+      err.textContent = attempt === 1
+        ? "⏳ Connecting to server..."
+        : `⏳ Retrying... (${attempt}/${MAX_RETRIES}) Server waking up, please wait`;
 
       const r = await fetch(`${SERVER_URL}/api/admin/stats`, {
         headers: { "x-admin-password": pwd },
-        signal: AbortSignal.timeout(20000) // 20 sec timeout per attempt
+        signal: AbortSignal.timeout(20000)
       });
 
       if (r.status === 401) { err.textContent = "❌ Wrong password"; return; }
       if (!r.ok) { err.textContent = "❌ Server error"; return; }
 
-      // Success!
+      // Success — save password
       adminPwd = pwd;
+      localStorage.setItem("fbdl_admin_pwd", pwd);
       document.getElementById("login-screen").style.display = "none";
       document.getElementById("app").style.display = "block";
       err.textContent = "";
@@ -443,6 +462,14 @@ async function doLogin() {
       return;
 
     } catch(e) {
+      if (attempt === MAX_RETRIES) {
+        err.textContent = "❌ Server unreachable — try again in 30 seconds";
+      } else {
+        await new Promise(r => setTimeout(r, 5000));
+      }
+    }
+  }
+}
       if (attempt === MAX_RETRIES) {
         err.textContent = "❌ Server unreachable — try again in 30 seconds";
       } else {
@@ -455,6 +482,7 @@ async function doLogin() {
 
 function doLogout() {
   adminPwd = "";
+  localStorage.removeItem("fbdl_admin_pwd");
   document.getElementById("login-screen").style.display = "flex";
   document.getElementById("app").style.display = "none";
   document.getElementById("admin-pwd").value = "";
