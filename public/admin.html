@@ -470,15 +470,6 @@ async function doLogin() {
     }
   }
 }
-      if (attempt === MAX_RETRIES) {
-        err.textContent = "❌ Server unreachable — try again in 30 seconds";
-      } else {
-        // Wait 5 sec before retry
-        await new Promise(r => setTimeout(r, 5000));
-      }
-    }
-  }
-}
 
 function doLogout() {
   adminPwd = "";
